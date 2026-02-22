@@ -1,5 +1,5 @@
 ---
-name: dev-agents
+name: other-sub-agents
 description: >
   Delegate development sub-tasks to local or cloud LLMs. Use this skill whenever the user
   asks to offload work to local models, mentions Ollama or Gemini, wants to use local AI or
@@ -9,9 +9,9 @@ description: >
   "delegate to local AI", "use Gemini", "use a cloud model", or asks about what models are available.
 ---
 
-# Development Sub-Agents
+# Other Sub Agents
 
-This skill delegates development sub-tasks to LLMs running either locally (via Ollama) or
+This skill delegates tasks to other LLM sub-agents running either locally (via Ollama) or
 in the cloud (via Google Gemini API). It discovers what's available, assesses each model's
 strengths, and routes tasks to the most appropriate model and provider.
 

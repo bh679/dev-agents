@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Trust score manager for dev-agents skill.
+Trust score manager for other-sub-agents skill.
 
 Maintains persistent trust scores per model and per task type,
 logs assessments after each interaction, and provides rankings
@@ -513,7 +513,7 @@ def _print_history_human(entries):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Trust score manager for dev-agents")
+    parser = argparse.ArgumentParser(description="Trust score manager for other-sub-agents")
     parser.add_argument("--action", required=True,
                         choices=["log", "query", "rankings", "history"],
                         help="Action to perform")

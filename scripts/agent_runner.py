@@ -759,7 +759,7 @@ def _run_comparison(args, system_prompt, temperature, user_content):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Run a dev task through a local (Ollama) or cloud (Gemini) LLM"
+        description="Run a task through a local (Ollama) or cloud (Gemini) LLM sub-agent"
     )
     parser.add_argument("--provider", default="ollama", choices=["ollama", "gemini"],
                         help="LLM provider (default: ollama)")

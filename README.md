@@ -1,4 +1,4 @@
-# dev-agents
+# other-sub-agents
 
 A [Claude Code](https://docs.anthropic.com/en/docs/claude-code) skill that delegates development sub-tasks to local and cloud LLMs.
 
@@ -29,10 +29,10 @@ Copy or symlink this directory into your Claude Code skills folder:
 
 ```bash
 # Clone the repo
-git clone https://github.com/bh679/dev-agents.git
+git clone https://github.com/bh679/other-sub-agents.git
 
 # Symlink into Claude Code skills
-ln -s "$(pwd)/dev-agents" ~/.claude/skills/dev-agents
+ln -s "$(pwd)/other-sub-agents" ~/.claude/skills/other-sub-agents
 ```
 
 ### Prerequisites
@@ -122,7 +122,7 @@ See `references/model-profiles.md` for detailed routing decisions.
 ## File Structure
 
 ```
-dev-agents/
+other-sub-agents/
   SKILL.md                       # Orchestration instructions for Claude Code
   scripts/
     agent_runner.py              # Core execution engine (both providers)
