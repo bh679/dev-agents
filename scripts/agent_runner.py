@@ -38,11 +38,30 @@ Examples:
         --prompt "Write API docs for this module:" \\
         --file /path/to/module.py \\
         --temperature 0.5
+
+    # Compare two models:
+    python3 agent_runner.py \\
+        --model "qwen2.5-coder:32b" \\
+        --model-b "gemini-2.5-flash" --provider-b gemini \\
+        --task code \\
+        --prompt "Write a function to merge two sorted lists." \\
+        --compare --no-stream
+
+    # Run with assessment:
+    python3 agent_runner.py \\
+        --model "qwen2.5-coder:32b" \\
+        --task code \\
+        --prompt "Write an email validator." \\
+        --assess --rating 4
 """
 
 import argparse
 import json
+import random
+import subprocess
 import sys
+import time
+import tempfile
 import urllib.request
 import urllib.error
 import os
@@ -103,6 +122,22 @@ TASK_TEMPERATURES = {
     "refactor": 0.3,
     "general": 0.5,
 }
+
+
+# ---------------------------------------------------------------------------
+# Trust manager integration
+# ---------------------------------------------------------------------------
+
+def _get_trust_manager():
+    """Import trust_manager from the same scripts directory."""
+    scripts_dir = os.path.dirname(os.path.abspath(__file__))
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
+    try:
+        import trust_manager
+        return trust_manager
+    except ImportError:
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -495,6 +530,230 @@ def call_gemini_sync(base_url, model, api_key, request_body, timeout):
 
 
 # ---------------------------------------------------------------------------
+# Unified model execution
+# ---------------------------------------------------------------------------
+
+def run_model(provider, model, system_prompt, user_content, temperature,
+              base_url=None, num_ctx=None, max_tokens=8192, timeout=120,
+              stream=True):
+    """
+    Run a single model and return (response, stats).
+
+    When stream=True, tokens are printed to stdout as they arrive.
+    When stream=False, the full response is returned silently.
+    """
+    if provider == "gemini":
+        api_key = get_gemini_api_key()
+        gemini_url = base_url or GEMINI_DEFAULT_URL
+        request_body = build_gemini_request(system_prompt, user_content, temperature, max_tokens)
+
+        if stream:
+            return call_gemini_streaming(gemini_url, model, api_key, request_body, timeout)
+        else:
+            return call_gemini_sync(gemini_url, model, api_key, request_body, timeout)
+
+    else:  # ollama
+        ollama_url = base_url or OLLAMA_DEFAULT_URL
+        messages = build_ollama_messages(system_prompt, user_content)
+
+        if stream:
+            return call_ollama_streaming(ollama_url, model, messages, temperature, num_ctx, timeout)
+        else:
+            return call_ollama_sync(ollama_url, model, messages, temperature, num_ctx, timeout)
+
+
+# ---------------------------------------------------------------------------
+# Assessment
+# ---------------------------------------------------------------------------
+
+def _do_assessment(response, stats, provider, model, task, prompt, rating_override, tm):
+    """Log an assessment and update trust scores."""
+    if rating_override is not None:
+        rating = rating_override
+    else:
+        rating = tm.auto_assess(response, task, prompt)
+
+    entry = {
+        "model": model,
+        "provider": provider,
+        "task_type": task,
+        "rating": rating,
+        "prompt_summary": prompt[:100],
+        "response_length": len(response),
+        "eval_tokens": stats.get("eval_count", 0),
+        "duration_ms": stats.get("total_duration_ms", 0),
+        "tokens_per_second": stats.get("tokens_per_second", 0),
+        "comparison_id": None,
+        "notes": "auto-assessed" if rating_override is None else "manual-rating",
+    }
+    tm.log_assessment(entry)
+    tm.update_trust_score(model, provider, task, rating)
+
+    print(f"\n--- Assessment ---", file=sys.stderr)
+    print(f"  Model: {model} [{provider}]", file=sys.stderr)
+    print(f"  Task: {task}", file=sys.stderr)
+    print(f"  Rating: {rating}/5 ({'auto' if rating_override is None else 'manual'})",
+          file=sys.stderr)
+    return rating
+
+
+# ---------------------------------------------------------------------------
+# Comparison mode
+# ---------------------------------------------------------------------------
+
+def _run_comparison(args, system_prompt, temperature, user_content):
+    """
+    Run two models on the same task and output structured comparison.
+
+    Strategy:
+    - Mixed providers (ollama + gemini): run in parallel via subprocess
+    - Same provider (ollama + ollama): run sequentially to avoid VRAM contention
+    """
+    from datetime import datetime, timezone
+
+    comparison_id = f"cmp-{int(time.time())}-{random.randint(1000, 9999)}"
+    provider_a = args.provider
+    provider_b = args.provider_b or args.provider
+    model_a = args.model
+    model_b = args.model_b
+    url_a = args.url if args.url != OLLAMA_DEFAULT_URL else (
+        OLLAMA_DEFAULT_URL if provider_a == "ollama" else GEMINI_DEFAULT_URL
+    )
+    url_b = args.url if args.url != OLLAMA_DEFAULT_URL else (
+        OLLAMA_DEFAULT_URL if provider_b == "ollama" else GEMINI_DEFAULT_URL
+    )
+
+    print(f"Comparison mode: {model_a} [{provider_a}] vs {model_b} [{provider_b}]",
+          file=sys.stderr)
+
+    mixed_providers = (provider_a != provider_b)
+
+    if mixed_providers:
+        # Run in parallel: launch model B as subprocess, run model A in main process
+        print(f"  Running in parallel (mixed providers)...", file=sys.stderr)
+
+        # Create temp file for subprocess output
+        scripts_dir = os.path.dirname(os.path.abspath(__file__))
+        tmp_fd, tmp_path = tempfile.mkstemp(suffix=".json", prefix="cmp_b_")
+        os.close(tmp_fd)
+
+        # Build subprocess command for model B
+        cmd = [
+            sys.executable, os.path.join(scripts_dir, "agent_runner.py"),
+            "--provider", provider_b,
+            "--model", model_b,
+            "--task", args.task,
+            "--prompt", args.prompt,
+            "--no-stream",
+            "--json-out", tmp_path,
+            "--timeout", str(args.timeout),
+            "--temperature", str(temperature),
+        ]
+        if args.system:
+            cmd.extend(["--system", args.system])
+        if args.file:
+            cmd.extend(["--file", args.file])
+        if args.max_tokens:
+            cmd.extend(["--max-tokens", str(args.max_tokens)])
+
+        # Start subprocess for model B
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=os.environ.copy(),
+        )
+
+        # Run model A in main process (no streaming for clean capture)
+        start_a = time.time()
+        response_a, stats_a = run_model(
+            provider_a, model_a, system_prompt, user_content, temperature,
+            base_url=url_a, num_ctx=args.num_ctx, max_tokens=args.max_tokens,
+            timeout=args.timeout, stream=False,
+        )
+        duration_a = (time.time() - start_a) * 1000
+
+        # Wait for subprocess
+        proc.wait()
+
+        # Read subprocess result
+        response_b = ""
+        stats_b = {}
+        duration_b = 0
+        try:
+            with open(tmp_path, "r") as f:
+                result_b = json.load(f)
+            response_b = result_b.get("response", "")
+            stats_b = result_b.get("stats", {})
+        except (json.JSONDecodeError, OSError) as e:
+            stderr_out = proc.stderr.read().decode("utf-8", errors="replace") if proc.stderr else ""
+            print(f"  Warning: Model B failed: {e}", file=sys.stderr)
+            if stderr_out:
+                print(f"  Stderr: {stderr_out[:500]}", file=sys.stderr)
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+
+    else:
+        # Same provider: run sequentially
+        print(f"  Running sequentially (same provider)...", file=sys.stderr)
+
+        # Model A
+        print(f"  Running model A: {model_a}...", file=sys.stderr)
+        start_a = time.time()
+        response_a, stats_a = run_model(
+            provider_a, model_a, system_prompt, user_content, temperature,
+            base_url=url_a, num_ctx=args.num_ctx, max_tokens=args.max_tokens,
+            timeout=args.timeout, stream=False,
+        )
+        duration_a = (time.time() - start_a) * 1000
+
+        # Model B
+        print(f"  Running model B: {model_b}...", file=sys.stderr)
+        start_b = time.time()
+        response_b, stats_b = run_model(
+            provider_b, model_b, system_prompt, user_content, temperature,
+            base_url=url_b, num_ctx=args.num_ctx, max_tokens=args.max_tokens,
+            timeout=args.timeout, stream=False,
+        )
+        duration_b = (time.time() - start_b) * 1000
+
+    # Build comparison result
+    comparison = {
+        "comparison_id": comparison_id,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "task_type": args.task,
+        "prompt": args.prompt,
+        "model_a": {
+            "model": model_a,
+            "provider": provider_a,
+            "response": response_a,
+            "stats": stats_a,
+            "wall_time_ms": round(duration_a, 1),
+        },
+        "model_b": {
+            "model": model_b,
+            "provider": provider_b,
+            "response": response_b,
+            "stats": stats_b,
+            "wall_time_ms": round(duration_b, 1) if duration_b else None,
+        },
+    }
+
+    # Save comparison file
+    tm = _get_trust_manager()
+    if tm:
+        filepath = tm.save_comparison(comparison_id, comparison)
+        if filepath:
+            print(f"  Comparison saved: {filepath}", file=sys.stderr)
+
+    # Print structured output for Claude to evaluate
+    print(json.dumps(comparison, indent=2))
+
+    return comparison
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -524,7 +783,28 @@ def main():
     parser.add_argument("--stats", action="store_true", help="Print generation stats to stderr")
     parser.add_argument("--json-out", help="Save response and stats to JSON file")
 
+    # Assessment flags
+    parser.add_argument("--assess", action="store_true",
+                        help="Assess the response and update trust scores")
+    parser.add_argument("--rating", type=int, choices=[1, 2, 3, 4, 5],
+                        help="Explicit rating (1-5). Overrides auto-assessment. Implies --assess")
+
+    # Comparison flags
+    parser.add_argument("--compare", action="store_true",
+                        help="Compare two models on the same task")
+    parser.add_argument("--model-b", help="Second model name for comparison")
+    parser.add_argument("--provider-b", choices=["ollama", "gemini"],
+                        help="Provider for second model (default: same as --provider)")
+
     args = parser.parse_args()
+
+    # --rating implies --assess
+    if args.rating is not None:
+        args.assess = True
+
+    # Validate comparison mode
+    if args.compare and not args.model_b:
+        parser.error("--compare requires --model-b")
 
     # Resolve system prompt
     system_prompt = args.system or TASK_SYSTEM_PROMPTS.get(args.task, TASK_SYSTEM_PROMPTS["general"])
@@ -541,35 +821,25 @@ def main():
     # Build user content (shared across providers)
     user_content = build_user_content(args.prompt, file_content, args.file)
 
-    # Dispatch to the right provider
-    if args.provider == "gemini":
-        api_key = get_gemini_api_key()
-        # Use Gemini URL unless user explicitly overrode --url
-        gemini_url = args.url if args.url != OLLAMA_DEFAULT_URL else GEMINI_DEFAULT_URL
-        request_body = build_gemini_request(system_prompt, user_content, temperature, args.max_tokens)
+    # --- Comparison mode ---
+    if args.compare:
+        _run_comparison(args, system_prompt, temperature, user_content)
+        return
 
-        if args.no_stream:
-            response, stats = call_gemini_sync(
-                gemini_url, args.model, api_key, request_body, args.timeout
-            )
-            print(response)
-        else:
-            response, stats = call_gemini_streaming(
-                gemini_url, args.model, api_key, request_body, args.timeout
-            )
+    # --- Normal single-model mode ---
+    base_url = args.url
+    if args.provider == "gemini" and args.url == OLLAMA_DEFAULT_URL:
+        base_url = GEMINI_DEFAULT_URL
 
-    else:  # ollama
-        messages = build_ollama_messages(system_prompt, user_content)
+    response, stats = run_model(
+        args.provider, args.model, system_prompt, user_content, temperature,
+        base_url=base_url, num_ctx=args.num_ctx, max_tokens=args.max_tokens,
+        timeout=args.timeout, stream=not args.no_stream,
+    )
 
-        if args.no_stream:
-            response, stats = call_ollama_sync(
-                args.url, args.model, messages, temperature, args.num_ctx, args.timeout
-            )
-            print(response)
-        else:
-            response, stats = call_ollama_streaming(
-                args.url, args.model, messages, temperature, args.num_ctx, args.timeout
-            )
+    # Print response if non-streaming (streaming already printed to stdout)
+    if args.no_stream:
+        print(response)
 
     # Print stats if requested
     if args.stats and stats:
@@ -594,6 +864,16 @@ def main():
         with open(args.json_out, "w") as f:
             json.dump(output, f, indent=2)
         print(f"Saved to {args.json_out}", file=sys.stderr)
+
+    # Assess if requested
+    if args.assess:
+        tm = _get_trust_manager()
+        if tm:
+            _do_assessment(response, stats, args.provider, args.model,
+                           args.task, args.prompt, args.rating, tm)
+        else:
+            print("Warning: trust_manager not available, skipping assessment.",
+                  file=sys.stderr)
 
 
 if __name__ == "__main__":

@@ -7,12 +7,13 @@ Supports two providers:
   - gemini: Google Gemini API (requires GEMINI_API_KEY env var)
 
 Usage:
-    python3 discover_models.py [--provider PROVIDER] [--json] [--task TASK_TYPE]
+    python3 discover_models.py [--provider PROVIDER] [--json] [--task TASK_TYPE] [--with-trust]
 
 Output:
     Human-readable summary of available models and their assessed capabilities.
     With --json, outputs structured JSON for programmatic use.
     With --task, recommends the best model for that task type.
+    With --with-trust, blends historical trust scores into model rankings.
 """
 
 import argparse
@@ -343,11 +344,151 @@ def fetch_running_models(base_url):
 # Gemini helpers
 # ---------------------------------------------------------------------------
 
+def _format_context_note(input_token_limit):
+    """Format a context note from an API-reported input token limit."""
+    if not input_token_limit:
+        return "Unknown context window"
+    if input_token_limit >= 1_000_000:
+        return f"Up to {input_token_limit // 1_000_000}M token context window"
+    if input_token_limit >= 1_000:
+        return f"Up to {input_token_limit // 1_000}K token context window"
+    return f"Up to {input_token_limit} token context window"
+
+
+def classify_gemini_model_dynamic(api_model_data):
+    """
+    Classify a Gemini model dynamically from API response metadata.
+
+    Falls back to the curated GEMINI_MODELS dict for known models,
+    but works for any model returned by the API.
+    """
+    raw_name = api_model_data.get("name", "")
+    name = raw_name.replace("models/", "")
+    display_name = api_model_data.get("displayName", name)
+    description = (api_model_data.get("description", "") or "").lower()
+    input_limit = api_model_data.get("inputTokenLimit", 0)
+    output_limit = api_model_data.get("outputTokenLimit", 0)
+
+    # Check curated dict first for known models
+    curated = GEMINI_MODELS.get(name)
+    if curated:
+        return {
+            "name": name,
+            "provider": "gemini",
+            "family": "gemini",
+            "families": ["gemini"],
+            "parameter_size": "Cloud",
+            "parameter_size_b": None,
+            "quantization": "",
+            "size_bytes": 0,
+            "primary_type": curated["primary_type"],
+            "capabilities": list(curated["capabilities"]),
+            "recommended_tasks": list(curated["recommended_tasks"]),
+            "context_note": _format_context_note(input_limit) if input_limit else curated["context_note"],
+            "quality_tier": curated["quality_tier"],
+            "rpm_limit": curated["rpm_limit"],
+            "tier": curated["tier"],
+            "display_name": curated.get("display_name", display_name),
+            "input_token_limit": input_limit,
+            "output_token_limit": output_limit,
+        }
+
+    # Dynamic classification based on name patterns and description
+    name_lower = name.lower()
+
+    # Determine primary type and quality tier from name
+    if "pro" in name_lower:
+        primary_type = "reasoning"
+        quality_tier = "high"
+    elif "flash" in name_lower and "lite" in name_lower:
+        primary_type = "general"
+        quality_tier = "moderate"
+    elif "flash" in name_lower:
+        primary_type = "general"
+        quality_tier = "good"
+    elif "ultra" in name_lower:
+        primary_type = "reasoning"
+        quality_tier = "high"
+    elif "nano" in name_lower:
+        primary_type = "general"
+        quality_tier = "basic"
+    else:
+        primary_type = "general"
+        quality_tier = "good"
+
+    # Determine tier
+    if "preview" in name_lower or "exp" in name_lower:
+        tier = "preview"
+    elif "lite" in name_lower:
+        tier = "free"
+    elif quality_tier == "high":
+        tier = "free-limited"
+    else:
+        tier = "free"
+
+    # Build capabilities from description keywords and type
+    capabilities = ["long-context"]
+    if primary_type == "reasoning":
+        capabilities.extend(["reasoning", "architecture", "code", "documentation",
+                             "planning", "review", "code-generation", "code-review"])
+    else:
+        capabilities.extend(["code", "reasoning", "documentation", "review",
+                             "code-generation", "debugging", "code-review"])
+
+    if quality_tier == "moderate":
+        capabilities = ["code", "documentation", "simple-tasks", "long-context"]
+
+    # Recommended tasks
+    if primary_type == "reasoning":
+        recommended_tasks = [
+            "Architecture and design analysis",
+            "Complex reasoning tasks",
+            "Comprehensive documentation",
+        ]
+    elif quality_tier == "moderate":
+        recommended_tasks = [
+            "Simple code generation",
+            "Quick documentation",
+            "Text transformations",
+        ]
+    else:
+        recommended_tasks = [
+            "Code generation",
+            "Code review",
+            "Documentation writing",
+        ]
+
+    # Estimate RPM from tier
+    rpm_map = {"high": 5, "good": 10, "moderate": 15, "basic": 30}
+    rpm_limit = rpm_map.get(quality_tier, 10)
+
+    return {
+        "name": name,
+        "provider": "gemini",
+        "family": "gemini",
+        "families": ["gemini"],
+        "parameter_size": "Cloud",
+        "parameter_size_b": None,
+        "quantization": "",
+        "size_bytes": 0,
+        "primary_type": primary_type,
+        "capabilities": capabilities,
+        "recommended_tasks": recommended_tasks,
+        "context_note": _format_context_note(input_limit),
+        "quality_tier": quality_tier,
+        "rpm_limit": rpm_limit,
+        "tier": tier,
+        "display_name": display_name,
+        "input_token_limit": input_limit,
+        "output_token_limit": output_limit,
+    }
+
+
 def classify_gemini_model(model_name):
-    """Classify a Gemini model using the known model definitions."""
+    """Classify a Gemini model by name. Uses curated data or dynamic fallback."""
+    # Try curated data first
     info = GEMINI_MODELS.get(model_name)
-    if not info:
-        # Unknown Gemini model — provide basic classification
+    if info:
         return {
             "name": model_name,
             "provider": "gemini",
@@ -357,36 +498,26 @@ def classify_gemini_model(model_name):
             "parameter_size_b": None,
             "quantization": "",
             "size_bytes": 0,
-            "primary_type": "general",
-            "capabilities": ["reasoning", "code"],
-            "recommended_tasks": ["General tasks"],
-            "context_note": "Up to 1M token context window",
-            "quality_tier": "good",
-            "rpm_limit": None,
-            "tier": "unknown",
+            "primary_type": info["primary_type"],
+            "capabilities": list(info["capabilities"]),
+            "recommended_tasks": list(info["recommended_tasks"]),
+            "context_note": info["context_note"],
+            "quality_tier": info["quality_tier"],
+            "rpm_limit": info["rpm_limit"],
+            "tier": info["tier"],
         }
 
-    return {
-        "name": model_name,
-        "provider": "gemini",
-        "family": "gemini",
-        "families": ["gemini"],
-        "parameter_size": "Cloud",
-        "parameter_size_b": None,
-        "quantization": "",
-        "size_bytes": 0,
-        "primary_type": info["primary_type"],
-        "capabilities": list(info["capabilities"]),
-        "recommended_tasks": list(info["recommended_tasks"]),
-        "context_note": info["context_note"],
-        "quality_tier": info["quality_tier"],
-        "rpm_limit": info["rpm_limit"],
-        "tier": info["tier"],
-    }
+    # Dynamic fallback using name-based heuristics
+    return classify_gemini_model_dynamic({"name": model_name})
 
 
 def check_gemini_availability():
-    """Check if the Gemini API is accessible. Returns (available_models, error_message)."""
+    """
+    Check Gemini API and return all available models with full metadata.
+
+    Returns (list_of_api_model_dicts, error_message).
+    Each dict contains the raw API response fields for dynamic classification.
+    """
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
         return [], "GEMINI_API_KEY not set. Get one at: https://aistudio.google.com/apikey"
@@ -399,22 +530,13 @@ def check_gemini_availability():
         with urllib.request.urlopen(req, timeout=15) as resp:
             data = json.loads(resp.read().decode())
             models = data.get("models", [])
-            # Filter to models we know about + any generateContent-capable models
             available = []
             for m in models:
                 name = m.get("name", "").replace("models/", "")
-                # Check if it supports generateContent
                 methods = m.get("supportedGenerationMethods", [])
-                if "generateContent" in methods:
-                    if name in GEMINI_MODELS:
-                        available.append(name)
-            # If none of our known models matched, include any that support generation
-            if not available:
-                for m in models:
-                    name = m.get("name", "").replace("models/", "")
-                    methods = m.get("supportedGenerationMethods", [])
-                    if "generateContent" in methods and "gemini" in name:
-                        available.append(name)
+                # Include any Gemini model that supports content generation
+                if "generateContent" in methods and "gemini" in name:
+                    available.append(m)
             return available, None
     except urllib.error.HTTPError as e:
         if e.code in (401, 403):
@@ -544,8 +666,29 @@ def print_human_report(classifications, running_models, provider_status):
     print()
 
 
-def score_models_for_task(classifications, task):
-    """Score all models for a given task type. Returns sorted list of (score, classification)."""
+def _get_trust_manager():
+    """Import trust_manager from the same scripts directory."""
+    scripts_dir = os.path.dirname(os.path.abspath(__file__))
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
+    try:
+        import trust_manager
+        return trust_manager
+    except ImportError:
+        return None
+
+
+def score_models_for_task(classifications, task, use_trust=False):
+    """
+    Score all models for a given task type.
+
+    When use_trust=True, blends historical trust scores with static scoring:
+    - 3+ runs on this task: final = static * 0.4 + trust * 0.6
+    - < 3 runs: final = static * 0.7 + trust * 0.3
+    - No trust data: static only
+
+    Returns sorted list of (score, classification).
+    """
     task_type_map = {
         "code": ["code-generation", "code"],
         "review": ["code-review", "review"],
@@ -560,30 +703,68 @@ def score_models_for_task(classifications, task):
     }
     target_caps = task_type_map.get(task, ["reasoning"])
 
+    # Load trust data if requested
+    trust_data = None
+    tm = None
+    if use_trust:
+        tm = _get_trust_manager()
+        if tm:
+            trust_data = tm.load_trust_scores()
+
     scored = []
     for c in classifications:
-        score = sum(1 for cap in target_caps if cap in c.get("capabilities", []))
+        static_score = sum(1 for cap in target_caps if cap in c.get("capabilities", []))
 
         # Size bonus for Ollama models
         psb = c.get("parameter_size_b") or 0
         if psb >= 65:
-            score += 2
+            static_score += 2
         elif psb >= 25:
-            score += 1
+            static_score += 1
 
         # Quality tier bonus for Gemini (since they have no parameter_size_b)
         if c.get("provider") == "gemini":
             tier = c.get("quality_tier", "")
             if tier == "high":
-                score += 2
+                static_score += 2
             elif tier == "good":
-                score += 1
+                static_score += 1
 
         # Slight preference for Ollama (local-first)
-        if c.get("provider") == "ollama" and score > 0:
-            score += 0.1
+        if c.get("provider") == "ollama" and static_score > 0:
+            static_score += 0.1
 
-        scored.append((score, c))
+        # Blend with trust score if available
+        final_score = static_score
+        trust_score_val = None
+        trust_count = 0
+
+        if trust_data and tm:
+            model_name = c.get("name", "")
+            model_trust = trust_data.get("models", {}).get(model_name)
+            if model_trust:
+                ts = model_trust.get("task_scores", {}).get(task)
+                if ts:
+                    trust_score_val = ts["score"]
+                    trust_count = ts["count"]
+
+                    # Scale trust (0-1) to match static score range
+                    # Use the max possible static score as the scaling factor
+                    max_static = len(target_caps) + 2 + 0.1  # caps + size bonus + local pref
+                    trust_scaled = trust_score_val * max_static
+
+                    if trust_count >= 3:
+                        final_score = static_score * 0.4 + trust_scaled * 0.6
+                    else:
+                        final_score = static_score * 0.7 + trust_scaled * 0.3
+
+        # Attach trust info to classification for reporting
+        c["_trust_score"] = trust_score_val
+        c["_trust_count"] = trust_count
+        c["_static_score"] = static_score
+        c["_final_score"] = round(final_score, 3)
+
+        scored.append((final_score, c))
 
     scored.sort(key=lambda x: (-x[0], -(x[1].get("parameter_size_b") or 0)))
     return scored
@@ -601,6 +782,10 @@ def main():
     parser.add_argument("--url", default=OLLAMA_DEFAULT_URL, help="Ollama API URL")
     parser.add_argument("--task",
                         help="Suggest best model for a task: code, review, docs, architecture, test, debug, general")
+    parser.add_argument("--with-trust", action="store_true",
+                        help="Blend historical trust scores into model rankings")
+    parser.add_argument("--seed-new", action="store_true",
+                        help="Auto-seed trust scores for newly discovered models")
     args = parser.parse_args()
 
     classifications = []
@@ -622,9 +807,9 @@ def main():
             running = fetch_running_models(args.url)
             classifications.extend(classify_model(m) for m in models)
 
-    # Discover Gemini models
+    # Discover Gemini models (now fully dynamic from API)
     if args.provider in ("all", "gemini"):
-        gemini_models, gemini_err = check_gemini_availability()
+        gemini_api_models, gemini_err = check_gemini_availability()
         if gemini_err:
             provider_status["gemini_error"] = gemini_err
             if args.provider == "gemini":
@@ -634,20 +819,60 @@ def main():
                 print(f"Warning: {gemini_err}", file=sys.stderr)
         else:
             provider_status["gemini"] = "ok"
-            classifications.extend(classify_gemini_model(name) for name in gemini_models)
+            # Dynamically classify each model from API metadata
+            classifications.extend(
+                classify_gemini_model_dynamic(m) for m in gemini_api_models
+            )
+
+    # Auto-seed new models if requested
+    if args.seed_new and classifications:
+        try:
+            import research_new_model
+            tm = _get_trust_manager()
+            if tm:
+                data = tm.load_trust_scores()
+                known = set(data.get("models", {}).keys())
+                new_count = 0
+                for c in classifications:
+                    name = c["name"]
+                    if name not in known:
+                        provider = c.get("provider", "ollama")
+                        est = research_new_model.estimate_scores(
+                            name, provider,
+                            model_type=c.get("primary_type"),
+                            size_b=c.get("parameter_size_b"),
+                        )
+                        seeded = research_new_model.seed_model(
+                            name, provider, est["scores"], notes=est["notes"]
+                        )
+                        if seeded:
+                            new_count += 1
+                            known.add(name)
+                            print(f"  Seeded new model: {name} [{provider}] "
+                                  f"(method: {est['method']}, "
+                                  f"avg: {sum(est['scores'].values())/len(est['scores'])*100:.0f}%)",
+                                  file=sys.stderr)
+                if new_count:
+                    print(f"Auto-seeded {new_count} new model(s).", file=sys.stderr)
+        except ImportError:
+            print("Warning: research_new_model.py not available, skipping auto-seed.",
+                  file=sys.stderr)
 
     # Task-specific recommendation
     if args.task:
-        scored = score_models_for_task(classifications, args.task)
+        scored = score_models_for_task(classifications, args.task,
+                                        use_trust=args.with_trust)
 
         if args.json:
             if scored and scored[0][0] > 0:
                 best = scored[0][1]
-                print(json.dumps({
+                result = {
                     "recommended": best["name"],
                     "provider": best.get("provider", "unknown"),
+                    "trust_blended": args.with_trust,
                     "all": [s[1] for s in scored if s[0] > 0],
-                }, indent=2))
+                }
+                print(json.dumps(result, indent=2))
             else:
                 print(json.dumps({"recommended": None, "all": []}, indent=2))
         else:
@@ -659,6 +884,13 @@ def main():
                 print(f"  Capabilities: {', '.join(best['capabilities'][:5])}")
                 if best.get("parameter_size"):
                     print(f"  Size: {best['parameter_size']}")
+                # Show trust info if blended
+                if args.with_trust and best.get("_trust_score") is not None:
+                    trust_pct = best["_trust_score"] * 100
+                    print(f"  Trust: {trust_pct:.1f}% ({best['_trust_count']} runs)")
+                    print(f"  Score: {best['_final_score']:.2f} (blended)")
+                elif args.with_trust:
+                    print(f"  Trust: no data (static scoring only)")
             else:
                 print(f"No suitable model found for '{args.task}' tasks.")
         return

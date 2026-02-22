@@ -28,6 +28,18 @@ Two providers are supported:
 
 ## How It Works
 
+### Step 0: Seed Initial Trust Scores (First Run Only)
+
+On first use, seed trust scores from published benchmark data:
+
+```bash
+python3 scripts/seed_trust.py
+```
+
+This populates `data/trust_scores.json` with baseline scores derived from HumanEval,
+SWE-bench, MBPP, BigCodeBench, MMLU, and other published benchmarks for ~35 common
+models. Seed scores have count=1, so actual assessments quickly override them.
+
 ### Step 1: Discover Available Models
 
 Before delegating, check what's available across both providers:
@@ -44,8 +56,71 @@ Options:
 - `--json` — structured JSON output
 - `--task code|review|docs|architecture|test|debug|general` — recommend best model for a task
 
+Options:
+- `--seed-new` — automatically seed trust scores for any newly discovered models
+
 If a provider is unavailable (Ollama not running, no Gemini key), discovery continues
 gracefully with the other provider.
+
+**When a new model appears** (one not in `data/trust_scores.json`):
+
+**Option A: Automatic seeding (recommended)**
+
+Run discovery with `--seed-new` to auto-research and seed new models:
+
+```bash
+python3 scripts/discover_models.py --seed-new
+```
+
+Or use the dedicated research script directly:
+
+```bash
+# Auto-discover and seed all new models
+python3 scripts/research_new_model.py --auto-discover
+
+# Seed a specific new model
+python3 scripts/research_new_model.py --model "new-model:14b" --provider ollama
+
+# Preview what would be seeded (dry run)
+python3 scripts/research_new_model.py --auto-discover --dry-run
+```
+
+The auto-research script estimates scores by:
+1. Looking for exact matches in the benchmark seed database
+2. Interpolating from similar models (same family, type, and size)
+3. Falling back to heuristic estimation based on model type, size, and family
+4. Scores start with count=1, so real assessments quickly override them
+
+**Option B: Manual research (for higher confidence)**
+
+1. Search the web for its published benchmarks (HumanEval, MBPP, SWE-bench, MMLU, etc.)
+2. Use those benchmarks to estimate initial trust scores per task type (0-1 scale)
+3. Log seed scores via `trust_manager.py` with count=1 so real assessments override quickly
+4. If no benchmarks exist, start with the static classification and use comparison mode
+   to build trust data against a known model
+
+### Step 1.5: Check Trust Scores
+
+After discovery, check historical trust scores to inform model selection:
+
+```bash
+python3 scripts/trust_manager.py --action rankings --task code --json
+```
+
+This shows all models ranked by their observed trust score for a given task type.
+Trust scores are built from your assessments after each sub-agent interaction.
+
+For blended recommendations (static capabilities + trust data):
+
+```bash
+python3 scripts/discover_models.py --task code --with-trust --json
+```
+
+**Trust score thresholds:**
+- **> 0.7 (70%)**: Use confidently — model has proven itself on this task type
+- **0.4–0.7**: Use but review output carefully
+- **< 0.4**: Consider an alternative or use comparison mode
+- **No data**: Use static recommendation, then assess to build trust data
 
 ### Step 2: Assess Model Fitness for the Task
 
@@ -121,6 +196,36 @@ Key flags:
 - `--max-tokens 8192` — max output tokens (Gemini only)
 - `--no-stream` — wait for full response instead of streaming
 
+### Step 3.5: Assess the Sub-Agent's Output
+
+After reviewing the sub-agent response, **always** log an assessment to build trust data:
+
+```bash
+python3 scripts/trust_manager.py --action log \
+  --model "qwen2.5-coder:32b" --provider ollama \
+  --task code --rating 4 \
+  --prompt-summary "Write email validation function"
+```
+
+Or combine execution with assessment in one command:
+
+```bash
+python3 scripts/agent_runner.py \
+  --model "qwen2.5-coder:32b" --task code \
+  --prompt "Write a function that validates email addresses." \
+  --assess --rating 4
+```
+
+**Rating scale (1–5):**
+- **5 (Excellent)**: Directly usable, no or trivial edits needed
+- **4 (Good)**: Mostly correct, minor fixes needed
+- **3 (Adequate)**: Partially useful, needs significant editing
+- **2 (Poor)**: Mostly wrong, major misunderstandings
+- **1 (Failed)**: Unusable — wrong language, ignored instructions, errored out
+
+Omit `--rating` to use auto-assessment (heuristic based on response length, code
+blocks, and structure). Always prefer explicit ratings when you can judge quality.
+
 ### Step 4: Integrate Results
 
 After getting a response from a sub-agent:
@@ -157,6 +262,47 @@ Avoid:
 - **Invalid key (401/403)**: Ask user to verify key
 - **Rate limit (429)**: Free tier is 10 RPM (Flash), 5 RPM (Pro). Wait or switch to Ollama
 - **Model not found (404)**: Check model name spelling
+
+## Comparison Mode (Dual-Model)
+
+When unsure which model is better for a task, or to build trust data faster,
+run two models on the same task simultaneously:
+
+```bash
+python3 scripts/agent_runner.py \
+  --model "qwen2.5-coder:32b" --provider ollama \
+  --model-b "gemini-2.5-flash" --provider-b gemini \
+  --task code \
+  --prompt "Write a function that validates email addresses." \
+  --compare --no-stream
+```
+
+This outputs both responses as structured JSON. Review both outputs, pick the
+best result, and **assess both models**:
+
+```bash
+# Rate the winner
+python3 scripts/trust_manager.py --action log \
+  --model "qwen2.5-coder:32b" --provider ollama \
+  --task code --rating 4 --prompt-summary "email validation"
+
+# Rate the other
+python3 scripts/trust_manager.py --action log \
+  --model "gemini-2.5-flash" --provider gemini \
+  --task code --rating 2 --prompt-summary "email validation"
+```
+
+**When to use comparison mode:**
+- A new model has been added and you need trust data quickly
+- Two models seem similarly capable for a task type
+- The user wants to see alternative approaches
+- Trust scores are close (within 10%) for the top two candidates
+
+**Execution strategy:**
+- Mixed providers (Ollama + Gemini): Runs in parallel — no contention
+- Same provider (Ollama + Ollama): Runs sequentially — avoids VRAM swapping
+
+Comparison results are saved in `data/comparisons/` for reference.
 
 ## Important Constraints
 

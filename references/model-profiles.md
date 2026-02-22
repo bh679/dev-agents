@@ -3,6 +3,22 @@
 Reference for understanding which models are good at what across providers.
 Helps with routing decisions when multiple models are available.
 
+## Trust-Based Selection
+
+This reference provides **static** capability profiles. The skill also maintains
+**dynamic trust scores** in `data/trust_scores.json` based on actual performance.
+
+When both are available, the blended score (40% static + 60% trust) guides
+model selection. Use `discover_models.py --task TYPE --with-trust` to see
+blended rankings. Trust scores decay over time — a model unused for 30 days
+will see its scores halved, ensuring stale data doesn't dominate.
+
+To query trust data directly:
+```bash
+python3 scripts/trust_manager.py --action rankings --task code
+python3 scripts/trust_manager.py --action query --model "qwen2.5-coder:32b"
+```
+
 ## How to Use This Reference
 
 Read this when you need to decide which model and provider to assign a task to.
