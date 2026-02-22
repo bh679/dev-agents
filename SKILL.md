@@ -33,10 +33,10 @@ Two providers are supported:
 On first use, seed trust scores from published benchmark data:
 
 ```bash
-python3 ~/.claude/skills/ollama-agents/ollama-agents/scripts/seed_trust.py
+python3 ~/.claude/skills/other-sub-agents/scripts/seed_trust.py
 ```
 
-This populates `~/.claude/skills/ollama-agents/ollama-agents/data/trust_scores.json` with baseline scores derived from HumanEval,
+This populates `~/.claude/skills/other-sub-agents/data/trust_scores.json` with baseline scores derived from HumanEval,
 SWE-bench, MBPP, BigCodeBench, MMLU, and other published benchmarks for ~35 common
 models. Seed scores have count=1, so actual assessments quickly override them.
 
@@ -45,7 +45,7 @@ models. Seed scores have count=1, so actual assessments quickly override them.
 Before delegating, check what's available across both providers:
 
 ```bash
-python3 ~/.claude/skills/ollama-agents/ollama-agents/scripts/discover_models.py
+python3 ~/.claude/skills/other-sub-agents/scripts/discover_models.py
 ```
 
 This checks Ollama at `localhost:11434` and (if `GEMINI_API_KEY` is set) the Gemini API.
@@ -62,27 +62,27 @@ Options:
 If a provider is unavailable (Ollama not running, no Gemini key), discovery continues
 gracefully with the other provider.
 
-**When a new model appears** (one not in `~/.claude/skills/ollama-agents/ollama-agents/data/trust_scores.json`):
+**When a new model appears** (one not in `~/.claude/skills/other-sub-agents/data/trust_scores.json`):
 
 **Option A: Automatic seeding (recommended)**
 
 Run discovery with `--seed-new` to auto-research and seed new models:
 
 ```bash
-python3 ~/.claude/skills/ollama-agents/ollama-agents/scripts/discover_models.py --seed-new
+python3 ~/.claude/skills/other-sub-agents/scripts/discover_models.py --seed-new
 ```
 
 Or use the dedicated research script directly:
 
 ```bash
 # Auto-discover and seed all new models
-python3 ~/.claude/skills/ollama-agents/ollama-agents/scripts/research_new_model.py --auto-discover
+python3 ~/.claude/skills/other-sub-agents/scripts/research_new_model.py --auto-discover
 
 # Seed a specific new model
-python3 ~/.claude/skills/ollama-agents/ollama-agents/scripts/research_new_model.py --model "new-model:14b" --provider ollama
+python3 ~/.claude/skills/other-sub-agents/scripts/research_new_model.py --model "new-model:14b" --provider ollama
 
 # Preview what would be seeded (dry run)
-python3 ~/.claude/skills/ollama-agents/ollama-agents/scripts/research_new_model.py --auto-discover --dry-run
+python3 ~/.claude/skills/other-sub-agents/scripts/research_new_model.py --auto-discover --dry-run
 ```
 
 The auto-research script estimates scores by:
@@ -104,7 +104,7 @@ The auto-research script estimates scores by:
 After discovery, check historical trust scores to inform model selection:
 
 ```bash
-python3 ~/.claude/skills/ollama-agents/ollama-agents/scripts/trust_manager.py --action rankings --task code --json
+python3 ~/.claude/skills/other-sub-agents/scripts/trust_manager.py --action rankings --task code --json
 ```
 
 This shows all models ranked by their observed trust score for a given task type.
@@ -113,7 +113,7 @@ Trust scores are built from your assessments after each sub-agent interaction.
 For blended recommendations (static capabilities + trust data):
 
 ```bash
-python3 ~/.claude/skills/ollama-agents/ollama-agents/scripts/discover_models.py --task code --with-trust --json
+python3 ~/.claude/skills/other-sub-agents/scripts/discover_models.py --task code --with-trust --json
 ```
 
 **Trust score thresholds:**
@@ -124,7 +124,7 @@ python3 ~/.claude/skills/ollama-agents/ollama-agents/scripts/discover_models.py 
 
 ### Step 2: Assess Model Fitness for the Task
 
-Read `~/.claude/skills/ollama-agents/ollama-agents/references/model-profiles.md` for detailed capability profiles.
+Read `~/.claude/skills/other-sub-agents/references/model-profiles.md` for detailed capability profiles.
 
 **Provider selection (Ollama first, Gemini as escalation):**
 
@@ -158,7 +158,7 @@ If no model is a strong match, don't delegate — do it yourself.
 
 **Ollama example (local):**
 ```bash
-python3 ~/.claude/skills/ollama-agents/ollama-agents/scripts/agent_runner.py \
+python3 ~/.claude/skills/other-sub-agents/scripts/agent_runner.py \
   --model "qwen2.5-coder:32b" \
   --task code \
   --prompt "Write a function that validates email addresses using regex." \
@@ -167,7 +167,7 @@ python3 ~/.claude/skills/ollama-agents/ollama-agents/scripts/agent_runner.py \
 
 **Gemini example (cloud):**
 ```bash
-python3 ~/.claude/skills/ollama-agents/ollama-agents/scripts/agent_runner.py \
+python3 ~/.claude/skills/other-sub-agents/scripts/agent_runner.py \
   --provider gemini \
   --model "gemini-2.5-flash" \
   --task code \
@@ -177,7 +177,7 @@ python3 ~/.claude/skills/ollama-agents/ollama-agents/scripts/agent_runner.py \
 
 **With file context (works with both providers):**
 ```bash
-python3 ~/.claude/skills/ollama-agents/ollama-agents/scripts/agent_runner.py \
+python3 ~/.claude/skills/other-sub-agents/scripts/agent_runner.py \
   --provider gemini \
   --model "gemini-2.5-pro" \
   --task review \
@@ -201,7 +201,7 @@ Key flags:
 After reviewing the sub-agent response, **always** log an assessment to build trust data:
 
 ```bash
-python3 ~/.claude/skills/ollama-agents/ollama-agents/scripts/trust_manager.py --action log \
+python3 ~/.claude/skills/other-sub-agents/scripts/trust_manager.py --action log \
   --model "qwen2.5-coder:32b" --provider ollama \
   --task code --rating 4 \
   --prompt-summary "Write email validation function"
@@ -210,7 +210,7 @@ python3 ~/.claude/skills/ollama-agents/ollama-agents/scripts/trust_manager.py --
 Or combine execution with assessment in one command:
 
 ```bash
-python3 ~/.claude/skills/ollama-agents/ollama-agents/scripts/agent_runner.py \
+python3 ~/.claude/skills/other-sub-agents/scripts/agent_runner.py \
   --model "qwen2.5-coder:32b" --task code \
   --prompt "Write a function that validates email addresses." \
   --assess --rating 4
@@ -269,7 +269,7 @@ When unsure which model is better for a task, or to build trust data faster,
 run two models on the same task simultaneously:
 
 ```bash
-python3 ~/.claude/skills/ollama-agents/ollama-agents/scripts/agent_runner.py \
+python3 ~/.claude/skills/other-sub-agents/scripts/agent_runner.py \
   --model "qwen2.5-coder:32b" --provider ollama \
   --model-b "gemini-2.5-flash" --provider-b gemini \
   --task code \
@@ -282,12 +282,12 @@ best result, and **assess both models**:
 
 ```bash
 # Rate the winner
-python3 ~/.claude/skills/ollama-agents/ollama-agents/scripts/trust_manager.py --action log \
+python3 ~/.claude/skills/other-sub-agents/scripts/trust_manager.py --action log \
   --model "qwen2.5-coder:32b" --provider ollama \
   --task code --rating 4 --prompt-summary "email validation"
 
 # Rate the other
-python3 ~/.claude/skills/ollama-agents/ollama-agents/scripts/trust_manager.py --action log \
+python3 ~/.claude/skills/other-sub-agents/scripts/trust_manager.py --action log \
   --model "gemini-2.5-flash" --provider gemini \
   --task code --rating 2 --prompt-summary "email validation"
 ```
@@ -302,7 +302,7 @@ python3 ~/.claude/skills/ollama-agents/ollama-agents/scripts/trust_manager.py --
 - Mixed providers (Ollama + Gemini): Runs in parallel — no contention
 - Same provider (Ollama + Ollama): Runs sequentially — avoids VRAM swapping
 
-Comparison results are saved in `~/.claude/skills/ollama-agents/ollama-agents/data/comparisons/` for reference.
+Comparison results are saved in `~/.claude/skills/other-sub-agents/data/comparisons/` for reference.
 
 ## Important Constraints
 
